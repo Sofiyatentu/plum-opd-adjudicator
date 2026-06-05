@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import Claim, Member, ExtractedData, AdjudicationStep, RejectionReason, FraudFlag, Document, Appeal
-from app.services.document_service import extract_from_structured_input
+from app.services.document_service import extract_from_structured_input, extract_from_uploaded_files
 from app.services.adjudication_service import run_adjudication
 from app.schemas.claim_schemas import ClaimInputData, ClaimDetailOut, ClaimSummaryOut, ClaimsListResponse, AppealResponse
 from app.utils.validators import is_network_hospital
@@ -69,6 +69,78 @@ async def submit_claim_from_json(data: ClaimInputData, db: AsyncSession) -> tupl
     # Reload with all relationships
     claim_out = await _load_claim_detail(claim.id, db)
     return claim, claim_out
+
+
+async def submit_claim_with_files(
+    data: ClaimInputData,
+    files: list[tuple[str, bytes, str]],
+    db: AsyncSession,
+) -> Claim:
+    """Submit a claim with uploaded document files.
+    
+    Files are processed with GPT-4o Vision for data extraction,
+    then the standard adjudication pipeline runs.
+    """
+    policy = get_policy()
+
+    # Find or create member
+    member = await _get_or_create_member(data, db)
+
+    # Check network hospital
+    is_network = is_network_hospital(data.hospital, policy.network_hospitals) if data.hospital else False
+
+    claim = Claim(
+        id=uuid.uuid4(),
+        claim_code=_next_claim_code(),
+        member_id=member.id,
+        treatment_date=data.treatment_date,
+        submission_date=date.today(),
+        claim_amount=data.claim_amount,
+        hospital_name=data.hospital or "Self-reported",
+        is_network=is_network,
+        is_cashless=bool(data.cashless_request and is_network),
+        status="processing",
+    )
+    db.add(claim)
+    await db.flush()
+
+    # Store Document records for each uploaded file
+    for file_name, file_bytes, doc_type in files:
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "unknown"
+        doc = Document(
+            id=uuid.uuid4(),
+            claim_id=claim.id,
+            file_name=file_name,
+            file_type=ext,
+            document_category=doc_type,
+            storage_path=f"uploads/{claim.id}/{file_name}",
+            file_size_bytes=len(file_bytes),
+        )
+        db.add(doc)
+
+    await db.flush()
+
+    # Extract document data using GPT-4o Vision
+    logger.info(f"Processing {len(files)} document(s) with GPT-4o Vision for claim {claim.claim_code}...")
+    await extract_from_uploaded_files(
+        claim_id=claim.id,
+        files=files,
+        db=db,
+    )
+    await db.flush()
+
+    # Refresh claim with relationships loaded
+    await db.refresh(claim, attribute_names=["extracted_data", "member"])
+    claim.member = member
+
+    # Run adjudication
+    logger.info(f"Running adjudication for claim {claim.claim_code}...")
+    await run_adjudication(claim, db)
+    await db.flush()
+
+    logger.info(f"Claim {claim.claim_code} complete: {claim.decision} (approved: {claim.approved_amount})")
+    return claim
+
 
 
 async def _get_or_create_member(data: ClaimInputData, db: AsyncSession) -> Member:

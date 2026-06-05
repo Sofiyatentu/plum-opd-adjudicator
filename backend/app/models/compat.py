@@ -17,6 +17,12 @@ class GUID(TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value is not None:
+            if dialect.name == "postgresql":
+                # PostgreSQL expects native UUID or string
+                if isinstance(value, uuid.UUID):
+                    return str(value)
+                return str(uuid.UUID(value))
+            # SQLite: store as hex
             if isinstance(value, uuid.UUID):
                 return value.hex
             return uuid.UUID(value).hex
@@ -24,7 +30,10 @@ class GUID(TypeDecorator):
 
     def process_result_value(self, value, dialect):
         if value is not None:
-            return uuid.UUID(value)
+            if isinstance(value, uuid.UUID):
+                return value
+            # Handle asyncpg UUID type
+            return uuid.UUID(str(value))
         return value
 
     def load_dialect_impl(self, dialect):

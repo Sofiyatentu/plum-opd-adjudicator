@@ -1,17 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Loader2, CheckCircle, Plus, Trash2 } from "lucide-react";
+import {
+  Loader2,
+  CheckCircle,
+  Upload,
+  FileText,
+  Image,
+  X,
+  Sparkles,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { submitClaim } from "@/lib/api";
+import { submitClaimWithFiles, submitClaim } from "@/lib/api";
 
 const claimSchema = z.object({
   member_id: z.string().min(1, "Member ID is required"),
@@ -25,32 +39,30 @@ const claimSchema = z.object({
     }),
   hospital_name: z.string().optional(),
   cashless_request: z.boolean().optional(),
-  // Prescription fields
-  doctor_name: z.string().optional(),
-  doctor_reg: z.string().optional(),
-  diagnosis: z.string().optional(),
-  medicines: z.string().optional(),
-  treatment: z.string().optional(),
-  // Bill fields
-  consultation_fee: z.string().optional(),
-  diagnostic_tests: z.string().optional(),
-  medicines_cost: z.string().optional(),
-  therapy_charges: z.string().optional(),
 });
 
 type ClaimFormData = z.infer<typeof claimSchema>;
+
+interface UploadedFile {
+  file: File;
+  type: "prescription" | "bill";
+  preview: string | null;
+}
 
 export default function SubmitClaimPage() {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittedClaimId, setSubmittedClaimId] = useState<string | null>(null);
-  const [procedures, setProcedures] = useState<string[]>([]);
-  const [newProcedure, setNewProcedure] = useState("");
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [dragActive, setDragActive] = useState<"prescription" | "bill" | null>(
+    null
+  );
+  const prescriptionInputRef = useRef<HTMLInputElement>(null);
+  const billInputRef = useRef<HTMLInputElement>(null);
 
   const {
     register,
     handleSubmit,
-    watch,
     formState: { errors },
   } = useForm<ClaimFormData>({
     resolver: zodResolver(claimSchema),
@@ -59,71 +71,111 @@ export default function SubmitClaimPage() {
     },
   });
 
-  const addProcedure = () => {
-    if (newProcedure.trim()) {
-      setProcedures((prev) => [...prev, newProcedure.trim()]);
-      setNewProcedure("");
-    }
+  const handleFileSelect = useCallback(
+    (files: FileList | null, type: "prescription" | "bill") => {
+      if (!files || files.length === 0) return;
+      const file = files[0];
+
+      // Validate file type
+      const validTypes = [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "application/pdf",
+      ];
+      if (!validTypes.includes(file.type)) {
+        toast.error("Please upload an image (JPG, PNG, WebP) or PDF file");
+        return;
+      }
+
+      // Validate file size (max 10MB)
+      if (file.size > 10 * 1024 * 1024) {
+        toast.error("File size must be less than 10MB");
+        return;
+      }
+
+      // Generate preview for images
+      let preview: string | null = null;
+      if (file.type.startsWith("image/")) {
+        preview = URL.createObjectURL(file);
+      }
+
+      // Replace existing file of the same type
+      setUploadedFiles((prev) => {
+        const filtered = prev.filter((f) => f.type !== type);
+        return [...filtered, { file, type, preview }];
+      });
+
+      toast.success(
+        `${type === "prescription" ? "Prescription" : "Bill"} document uploaded`
+      );
+    },
+    []
+  );
+
+  const removeFile = (type: "prescription" | "bill") => {
+    setUploadedFiles((prev) => {
+      const removed = prev.find((f) => f.type === type);
+      if (removed?.preview) URL.revokeObjectURL(removed.preview);
+      return prev.filter((f) => f.type !== type);
+    });
   };
 
-  const removeProcedure = (index: number) => {
-    setProcedures((prev) => prev.filter((_, i) => i !== index));
+  const handleDrag = (
+    e: React.DragEvent,
+    type: "prescription" | "bill",
+    active: boolean
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(active ? type : null);
+  };
+
+  const handleDrop = (e: React.DragEvent, type: "prescription" | "bill") => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(null);
+    handleFileSelect(e.dataTransfer.files, type);
   };
 
   const onSubmit = async (data: ClaimFormData) => {
+    if (uploadedFiles.length === 0) {
+      toast.error(
+        "Please upload at least one document (prescription or bill)"
+      );
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      // Build the structured JSON that the backend expects
-      const documents: Record<string, unknown> = {};
+      // Build FormData for file upload
+      const formData = new FormData();
+      formData.append("member_id", data.member_id);
+      formData.append("member_name", data.member_name);
+      formData.append("treatment_date", data.treatment_date);
+      formData.append("claim_amount", data.claim_amount);
+      formData.append("hospital", data.hospital_name || "");
+      formData.append(
+        "cashless_request",
+        String(data.cashless_request || false)
+      );
 
-      // Build prescription if any prescription fields are filled
-      if (data.doctor_name || data.doctor_reg || data.diagnosis) {
-        const prescription: Record<string, unknown> = {};
-        if (data.doctor_name) prescription.doctor_name = data.doctor_name;
-        if (data.doctor_reg) prescription.doctor_reg = data.doctor_reg;
-        if (data.diagnosis) prescription.diagnosis = data.diagnosis;
-        if (data.medicines) {
-          prescription.medicines_prescribed = data.medicines
-            .split(",")
-            .map((m) => m.trim())
-            .filter(Boolean);
-        }
-        if (data.treatment) prescription.treatment = data.treatment;
-        if (procedures.length > 0) prescription.procedures = procedures;
-        documents.prescription = prescription;
-      }
+      // Attach files
+      const prescriptionFile = uploadedFiles.find(
+        (f) => f.type === "prescription"
+      );
+      const billFile = uploadedFiles.find((f) => f.type === "bill");
 
-      // Build bill if any bill fields are filled
-      const bill: Record<string, number> = {};
-      if (data.consultation_fee && Number(data.consultation_fee) > 0) {
-        bill.consultation_fee = Number(data.consultation_fee);
+      if (prescriptionFile) {
+        formData.append("prescription_file", prescriptionFile.file);
       }
-      if (data.diagnostic_tests && Number(data.diagnostic_tests) > 0) {
-        bill.diagnostic_tests = Number(data.diagnostic_tests);
-      }
-      if (data.medicines_cost && Number(data.medicines_cost) > 0) {
-        bill.medicines = Number(data.medicines_cost);
-      }
-      if (data.therapy_charges && Number(data.therapy_charges) > 0) {
-        bill.therapy_charges = Number(data.therapy_charges);
-      }
-      if (Object.keys(bill).length > 0) {
-        documents.bill = bill;
+      if (billFile) {
+        formData.append("bill_file", billFile.file);
       }
 
-      const payload = {
-        member_id: data.member_id,
-        member_name: data.member_name,
-        treatment_date: data.treatment_date,
-        claim_amount: Number(data.claim_amount),
-        hospital: data.hospital_name || undefined,
-        cashless_request: data.cashless_request || false,
-        documents,
-      };
-
-      const result = await submitClaim(payload);
+      const result = await submitClaimWithFiles(formData);
       setSubmittedClaimId(result.claim_id);
-      toast.success("Claim submitted successfully!");
+      toast.success("Claim submitted and processed successfully!");
       setTimeout(() => {
         router.push(`/claims/${result.claim_id}`);
       }, 2000);
@@ -144,7 +196,8 @@ export default function SubmitClaimPage() {
             <CheckCircle className="mx-auto h-16 w-16 text-success" />
             <h2 className="mt-4 text-2xl font-bold">Claim Submitted!</h2>
             <p className="mt-2 text-muted-foreground">
-              Your claim is being processed. Claim ID:{" "}
+              Your documents have been processed with AI and the claim is being
+              adjudicated. Claim ID:{" "}
               <span className="font-mono font-bold text-primary">
                 {submittedClaimId}
               </span>
@@ -161,15 +214,188 @@ export default function SubmitClaimPage() {
     );
   }
 
+  const prescriptionFile = uploadedFiles.find(
+    (f) => f.type === "prescription"
+  );
+  const billFile = uploadedFiles.find((f) => f.type === "bill");
+
   return (
     <div className="container mx-auto px-4 py-10">
       <div className="mx-auto max-w-3xl">
         <h1 className="text-3xl font-bold tracking-tight">Submit a Claim</h1>
         <p className="mt-2 text-muted-foreground">
-          Fill in the claim details and medical document information
+          Upload your medical documents and fill in the claim details. Our AI
+          will extract and process the information automatically.
         </p>
 
         <form onSubmit={handleSubmit(onSubmit)} className="mt-8 space-y-8">
+          {/* Document Upload Section */}
+          <Card className="border-2 border-dashed border-primary/30 bg-primary/5">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-primary" />
+                Upload Medical Documents
+              </CardTitle>
+              <CardDescription>
+                Upload prescription and bill images or PDFs. AI (GPT-4o Vision)
+                will automatically extract the relevant information.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Prescription Upload */}
+              <div>
+                <Label className="text-sm font-semibold">
+                  Prescription Document
+                </Label>
+                <p className="text-xs text-muted-foreground mb-2">
+                  Upload a photo or scan of the doctor&apos;s prescription
+                </p>
+                {!prescriptionFile ? (
+                  <div
+                    className={`relative cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-all hover:border-primary hover:bg-primary/5 ${
+                      dragActive === "prescription"
+                        ? "border-primary bg-primary/10"
+                        : "border-muted-foreground/30"
+                    }`}
+                    onClick={() => prescriptionInputRef.current?.click()}
+                    onDragEnter={(e) => handleDrag(e, "prescription", true)}
+                    onDragLeave={(e) => handleDrag(e, "prescription", false)}
+                    onDragOver={(e) => handleDrag(e, "prescription", true)}
+                    onDrop={(e) => handleDrop(e, "prescription")}
+                  >
+                    <Upload className="mx-auto h-10 w-10 text-muted-foreground" />
+                    <p className="mt-2 text-sm font-medium">
+                      Click to upload or drag and drop
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      JPG, PNG, WebP or PDF (max 10MB)
+                    </p>
+                    <input
+                      ref={prescriptionInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,application/pdf"
+                      className="hidden"
+                      onChange={(e) =>
+                        handleFileSelect(e.target.files, "prescription")
+                      }
+                    />
+                  </div>
+                ) : (
+                  <div className="relative rounded-lg border bg-card p-4">
+                    <button
+                      type="button"
+                      onClick={() => removeFile("prescription")}
+                      className="absolute top-2 right-2 rounded-full bg-destructive/10 p-1 text-destructive hover:bg-destructive/20"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                    <div className="flex items-center gap-4">
+                      {prescriptionFile.preview ? (
+                        <img
+                          src={prescriptionFile.preview}
+                          alt="Prescription preview"
+                          className="h-20 w-20 rounded-md object-cover border"
+                        />
+                      ) : (
+                        <div className="flex h-20 w-20 items-center justify-center rounded-md bg-muted">
+                          <FileText className="h-8 w-8 text-muted-foreground" />
+                        </div>
+                      )}
+                      <div>
+                        <p className="font-medium text-sm">
+                          {prescriptionFile.file.name}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {(prescriptionFile.file.size / 1024).toFixed(1)} KB •{" "}
+                          {prescriptionFile.file.type.split("/")[1].toUpperCase()}
+                        </p>
+                        <p className="text-xs text-success mt-1 flex items-center gap-1">
+                          <CheckCircle className="h-3 w-3" /> Ready for AI
+                          processing
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Bill Upload */}
+              <div>
+                <Label className="text-sm font-semibold">Bill / Invoice</Label>
+                <p className="text-xs text-muted-foreground mb-2">
+                  Upload a photo or scan of the medical bill
+                </p>
+                {!billFile ? (
+                  <div
+                    className={`relative cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-all hover:border-primary hover:bg-primary/5 ${
+                      dragActive === "bill"
+                        ? "border-primary bg-primary/10"
+                        : "border-muted-foreground/30"
+                    }`}
+                    onClick={() => billInputRef.current?.click()}
+                    onDragEnter={(e) => handleDrag(e, "bill", true)}
+                    onDragLeave={(e) => handleDrag(e, "bill", false)}
+                    onDragOver={(e) => handleDrag(e, "bill", true)}
+                    onDrop={(e) => handleDrop(e, "bill")}
+                  >
+                    <Upload className="mx-auto h-10 w-10 text-muted-foreground" />
+                    <p className="mt-2 text-sm font-medium">
+                      Click to upload or drag and drop
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      JPG, PNG, WebP or PDF (max 10MB)
+                    </p>
+                    <input
+                      ref={billInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,application/pdf"
+                      className="hidden"
+                      onChange={(e) =>
+                        handleFileSelect(e.target.files, "bill")
+                      }
+                    />
+                  </div>
+                ) : (
+                  <div className="relative rounded-lg border bg-card p-4">
+                    <button
+                      type="button"
+                      onClick={() => removeFile("bill")}
+                      className="absolute top-2 right-2 rounded-full bg-destructive/10 p-1 text-destructive hover:bg-destructive/20"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                    <div className="flex items-center gap-4">
+                      {billFile.preview ? (
+                        <img
+                          src={billFile.preview}
+                          alt="Bill preview"
+                          className="h-20 w-20 rounded-md object-cover border"
+                        />
+                      ) : (
+                        <div className="flex h-20 w-20 items-center justify-center rounded-md bg-muted">
+                          <FileText className="h-8 w-8 text-muted-foreground" />
+                        </div>
+                      )}
+                      <div>
+                        <p className="font-medium text-sm">
+                          {billFile.file.name}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {(billFile.file.size / 1024).toFixed(1)} KB •{" "}
+                          {billFile.file.type.split("/")[1].toUpperCase()}
+                        </p>
+                        <p className="text-xs text-success mt-1 flex items-center gap-1">
+                          <CheckCircle className="h-3 w-3" /> Ready for AI
+                          processing
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Member & Claim Details */}
           <Card>
             <CardHeader>
@@ -254,7 +480,10 @@ export default function SubmitClaimPage() {
                     className="h-4 w-4 rounded border-gray-300"
                     {...register("cashless_request")}
                   />
-                  <Label htmlFor="cashless_request" className="text-sm cursor-pointer">
+                  <Label
+                    htmlFor="cashless_request"
+                    className="text-sm cursor-pointer"
+                  >
                     Request cashless treatment
                   </Label>
                 </div>
@@ -262,169 +491,42 @@ export default function SubmitClaimPage() {
             </CardContent>
           </Card>
 
-          {/* Prescription Details */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Prescription Details</CardTitle>
-              <CardDescription>
-                Enter details from the doctor&apos;s prescription
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="doctor_name">Doctor Name</Label>
-                  <Input
-                    id="doctor_name"
-                    placeholder="Dr. Sharma"
-                    {...register("doctor_name")}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="doctor_reg">Doctor Reg. Number</Label>
-                  <Input
-                    id="doctor_reg"
-                    placeholder="KA/45678/2015"
-                    {...register("doctor_reg")}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Format: STATE/NUMBER/YEAR (e.g., KA/45678/2015)
-                  </p>
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="diagnosis">Diagnosis</Label>
-                <Input
-                  id="diagnosis"
-                  placeholder="Viral fever"
-                  {...register("diagnosis")}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="medicines">Medicines Prescribed</Label>
-                <Input
-                  id="medicines"
-                  placeholder="Paracetamol 650mg, Vitamin C (comma-separated)"
-                  {...register("medicines")}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Separate multiple medicines with commas
+          {/* AI Processing Note */}
+          <div className="rounded-lg bg-muted/50 p-4 text-sm text-muted-foreground">
+            <div className="flex items-start gap-3">
+              <Sparkles className="h-5 w-5 text-primary mt-0.5 shrink-0" />
+              <div>
+                <p className="font-medium text-foreground">
+                  AI-Powered Processing
+                </p>
+                <p className="mt-1">
+                  Your uploaded documents will be analyzed by GPT-4o Vision to
+                  extract doctor details, diagnosis, medicines, and bill amounts.
+                  The extracted data is then run through our 6-step adjudication
+                  engine for an instant decision.
                 </p>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="treatment">Treatment / Therapy</Label>
-                <Input
-                  id="treatment"
-                  placeholder="Panchakarma therapy"
-                  {...register("treatment")}
-                />
-              </div>
-              {/* Procedures */}
-              <div className="space-y-2">
-                <Label>Procedures</Label>
-                <div className="flex gap-2">
-                  <Input
-                    value={newProcedure}
-                    onChange={(e) => setNewProcedure(e.target.value)}
-                    placeholder="Root canal treatment"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        addProcedure();
-                      }
-                    }}
-                  />
-                  <Button type="button" variant="outline" size="icon" onClick={addProcedure}>
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </div>
-                {procedures.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {procedures.map((proc, i) => (
-                      <div
-                        key={i}
-                        className="flex items-center justify-between rounded-md bg-muted px-3 py-1.5 text-sm"
-                      >
-                        <span>{proc}</span>
-                        <button
-                          type="button"
-                          onClick={() => removeProcedure(i)}
-                          className="text-muted-foreground hover:text-destructive"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
 
-          {/* Bill Details */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Bill Details</CardTitle>
-              <CardDescription>
-                Enter the itemized amounts from the bill
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="consultation_fee">Consultation Fee (₹)</Label>
-                  <Input
-                    id="consultation_fee"
-                    type="number"
-                    placeholder="1000"
-                    min="0"
-                    {...register("consultation_fee")}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="diagnostic_tests">Diagnostic Tests (₹)</Label>
-                  <Input
-                    id="diagnostic_tests"
-                    type="number"
-                    placeholder="500"
-                    min="0"
-                    {...register("diagnostic_tests")}
-                  />
-                </div>
-              </div>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="medicines_cost">Medicines (₹)</Label>
-                  <Input
-                    id="medicines_cost"
-                    type="number"
-                    placeholder="2000"
-                    min="0"
-                    {...register("medicines_cost")}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="therapy_charges">Therapy Charges (₹)</Label>
-                  <Input
-                    id="therapy_charges"
-                    type="number"
-                    placeholder="3000"
-                    min="0"
-                    {...register("therapy_charges")}
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Button type="submit" size="lg" className="w-full" disabled={isSubmitting}>
+          <Button
+            type="submit"
+            size="lg"
+            className="w-full"
+            disabled={isSubmitting || uploadedFiles.length === 0}
+          >
             {isSubmitting ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Processing Claim...
+                Processing Documents with AI...
               </>
+            ) : uploadedFiles.length === 0 ? (
+              "Upload Documents to Submit"
             ) : (
-              "Submit Claim"
+              <>
+                <Sparkles className="mr-2 h-4 w-4" />
+                Submit Claim & Process with AI
+              </>
             )}
           </Button>
         </form>

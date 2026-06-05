@@ -45,6 +45,31 @@ export async function submitClaim(data: Record<string, unknown>): Promise<{ clai
   });
 }
 
+/**
+ * Submit a claim with uploaded document files (images/PDFs).
+ * Uses multipart/form-data for file upload.
+ */
+export async function submitClaimWithFiles(
+  formData: FormData
+): Promise<{ claim_id: string; status: string }> {
+  const res = await fetch(`${API_BASE}/claims/upload`, {
+    method: "POST",
+    body: formData,
+    // Don't set Content-Type header — browser sets it with boundary
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(
+      body.detail || `Upload failed with status ${res.status}`,
+      res.status,
+      body
+    );
+  }
+
+  return res.json();
+}
+
 export async function getClaim(claimId: string): Promise<ClaimDetail> {
   return request(`/claims/${claimId}`);
 }
@@ -71,3 +96,4 @@ export async function getMember(memberId: string): Promise<{
 }> {
   return request(`/members/${memberId}`);
 }
+
