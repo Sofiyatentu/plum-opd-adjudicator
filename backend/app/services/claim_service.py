@@ -15,13 +15,8 @@ from app.rules.policy_loader import get_policy
 
 logger = logging.getLogger(__name__)
 
-_counter: int = 1000
-
-
 def _next_claim_code() -> str:
-    global _counter
-    _counter += 1
-    return f"CLM_{_counter:05d}"
+    return f"CLM_{uuid.uuid4().hex[:8].upper()}"
 
 
 async def submit_claim_from_json(data: ClaimInputData, db: AsyncSession) -> tuple[Claim, ClaimDetailOut]:
@@ -274,10 +269,5 @@ async def appeal_claim(claim_id: uuid.UUID, reason: str, db: AsyncSession) -> Ap
     return AppealResponse(appeal_id=str(appeal.id), status=appeal.status)
 
 
-_appeal_counter: int = 1000
-
-
 def _next_appeal_code() -> str:
-    global _appeal_counter
-    _appeal_counter += 1
-    return f"{_appeal_counter:05d}"
+    return f"APL_{uuid.uuid4().hex[:8].upper()}"
