@@ -49,16 +49,28 @@ class PolicyTerms:
 def _load_policy_terms() -> PolicyTerms:
     settings = get_settings()
     path = settings.policy_terms_path
-    # Resolve relative path
-    if not os.path.isabs(path):
-        path = os.path.abspath(path)
-    if not os.path.exists(path):
-        # Try relative to the project root
-        alt = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "policy_terms.json")
-        if os.path.exists(alt):
-            path = alt
 
-    with open(path, "r") as f:
+    # Search multiple locations
+    candidates = [
+        path,
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "policy_terms.json"),  # backend/
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "..", "policy_terms.json"),  # project root
+        os.path.join(os.getcwd(), "policy_terms.json"),
+    ]
+
+    resolved = None
+    for candidate in candidates:
+        abs_path = os.path.abspath(candidate) if not os.path.isabs(candidate) else candidate
+        if os.path.exists(abs_path):
+            resolved = abs_path
+            break
+
+    if not resolved:
+        raise FileNotFoundError(
+            f"policy_terms.json not found. Searched: {[os.path.abspath(c) for c in candidates]}"
+        )
+
+    with open(resolved, "r") as f:
         raw = json.load(f)
 
     coverage = raw["coverage_details"]
